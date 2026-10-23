@@ -1,0 +1,7 @@
+target/
+*.aof
+*.aof.rewrite.tmp
+.idea/
+*.iml
+.vscode/
+.DS_Store

@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (Java ${{ matrix.java }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        java: [21, 25]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+      - run: ./mvnw -B verify
+
+  redis-tools:
+    name: Compatibility with redis-cli, redis-benchmark and redis-py
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: maven
+      - run: ./mvnw -B -q package -DskipTests
+      - run: sudo apt-get update -q && sudo apt-get install -y -q redis-tools
+      - name: Start EmberDB with the append-only file enabled
+        run: |
+          java -jar target/emberdb.jar --port 6380 --appendonly yes --dir "$RUNNER_TEMP" &
+          for i in $(seq 1 30); do redis-cli -p 6380 ping && break; sleep 1; done
+      - name: Smoke test with redis-cli
+        run: scripts/smoke-test.sh 6380
+      - name: redis-benchmark
+        run: |
+          redis-benchmark -p 6380 -q -n 50000 -c 50 \
+            -t ping,set,get,incr,lpush,rpush,lpop,rpop,sadd,hset,spop,zadd,zpopmin,lrange_100,mset
+      - name: Restart and check the data was persisted
+        run: |
+          redis-cli -p 6380 shutdown || true
+          sleep 2
+          java -jar target/emberdb.jar --port 6380 --appendonly yes --dir "$RUNNER_TEMP" &
+          for i in $(seq 1 30); do redis-cli -p 6380 ping && break; sleep 1; done
+          test "$(redis-cli -p 6380 get smoke:greeting)" = "hello from ci"
+          test "$(redis-cli -p 6380 zscore smoke:board bob)" = "20"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: redis-py over RESP2 and RESP3 (flushes the data, so it runs last)
+        run: |
+          pip install --quiet redis
+          python scripts/redis_py_check.py 6380
